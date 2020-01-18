@@ -63,6 +63,10 @@ const exported = {
         config.ACCESS_TOKEN = token;
     },
 
+    set loadTilesFunction(loadFn: Function) {
+        config.LOAD_TILES_FUNCTION = loadFn;
+    },
+
     /**
      * Gets and sets the map's default API URL for requesting tiles, styles, sprites, and glyphs
      *
