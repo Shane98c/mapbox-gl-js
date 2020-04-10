@@ -3,7 +3,6 @@
 import {
     bindAll,
     extend,
-    deepEqual,
     warnOnce,
     clamp,
     wrap,
@@ -16,12 +15,15 @@ import LngLat from '../geo/lng_lat';
 import LngLatBounds from '../geo/lng_lat_bounds';
 import Point from '@mapbox/point-geometry';
 import {Event, Evented} from '../util/evented';
+import assert from 'assert';
+import {Debug} from '../util/debug';
 
 import type Transform from '../geo/transform';
 import type {LngLatLike} from '../geo/lng_lat';
 import type {LngLatBoundsLike} from '../geo/lng_lat_bounds';
 import type {TaskID} from '../util/task_queue';
 import type {PointLike} from '@mapbox/point-geometry';
+import type {PaddingOptions} from '../geo/edge_insets';
 
 /**
  * Options common to {@link Map#jumpTo}, {@link Map#easeTo}, and {@link Map#flyTo}, controlling the desired location,
@@ -35,13 +37,15 @@ import type {PointLike} from '@mapbox/point-geometry';
  * is "up"; for example, a bearing of 90° orients the map so that east is up.
  * @property {number} pitch The desired pitch, in degrees.
  * @property {LngLatLike} around If `zoom` is specified, `around` determines the point around which the zoom is centered.
+ * @property {PaddingOptions} padding Dimensions in pixels applied on each side of the viewport for shifting the vanishing point.
  */
 export type CameraOptions = {
     center?: LngLatLike,
     zoom?: number,
     bearing?: number,
     pitch?: number,
-    around?: LngLatLike
+    around?: LngLatLike,
+    padding?: PaddingOptions
 };
 
 /**
@@ -60,7 +64,7 @@ export type CameraOptions = {
  */
 export type AnimationOptions = {
     duration?: number,
-    easing?: (number) => number,
+    easing?: (_: number) => number,
     offset?: PointLike,
     animate?: boolean,
     essential?: boolean
@@ -83,18 +87,20 @@ class Camera extends Evented {
     _zooming: boolean;
     _rotating: boolean;
     _pitching: boolean;
+    _padding: boolean;
 
     _bearingSnap: number;
     _easeEndTimeoutID: TimeoutID;
     _easeStart: number;
-    _easeOptions: {duration: number, easing: (number) => number};
+    _easeOptions: {duration: number, easing: (_: number) => number};
+    _easeId: string | void;
 
-    _onEaseFrame: (number) => void;
-    _onEaseEnd: () => void;
+    _onEaseFrame: (_: number) => void;
+    _onEaseEnd: (easeId?: string) => void;
     _easeFrameId: ?TaskID;
 
     +_requestRenderFrame: (() => void) => TaskID;
-    +_cancelRenderFrame: (TaskID) => void;
+    +_cancelRenderFrame: (_: TaskID) => void;
 
     constructor(transform: Transform, options: {bearingSnap: number}) {
         super();
@@ -104,6 +110,8 @@ class Camera extends Evented {
         this._bearingSnap = options.bearingSnap;
 
         bindAll(['_renderFrameCallback'], this);
+
+        //addAssertions(this);
     }
 
     /**
@@ -135,7 +143,7 @@ class Camera extends Evented {
      *
      * @memberof Map#
      * @param offset `x` and `y` coordinates by which to pan the map.
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires moveend
@@ -152,7 +160,7 @@ class Camera extends Evented {
      *
      * @memberof Map#
      * @param lnglat The location to pan the map to.
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires moveend
@@ -199,7 +207,7 @@ class Camera extends Evented {
      *
      * @memberof Map#
      * @param zoom The zoom level to transition to.
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires zoomstart
@@ -219,7 +227,7 @@ class Camera extends Evented {
      * Increases the map's zoom level by 1.
      *
      * @memberof Map#
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires zoomstart
@@ -238,7 +246,7 @@ class Camera extends Evented {
      * Decreases the map's zoom level by 1.
      *
      * @memberof Map#
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires zoomstart
@@ -285,12 +293,40 @@ class Camera extends Evented {
     }
 
     /**
+     * Returns the current padding applied around the map viewport.
+     *
+     * @memberof Map#
+     * @returns The current padding around the map viewport.
+     */
+    getPadding(): PaddingOptions { return this.transform.padding; }
+
+    /**
+     * Sets the padding in pixels around the viewport.
+     *
+     * Equivalent to `jumpTo({padding: padding})`.
+     *
+     * @memberof Map#
+     * @param padding The desired padding. Format: { left: number, right: number, top: number, bottom: number }
+     * @param eventData Additional properties to be added to event objects of events triggered by this method.
+     * @fires movestart
+     * @fires moveend
+     * @returns {Map} `this`
+     * @example
+     * // Sets a left padding of 300px, and a top padding of 50px
+     * map.setPadding({ left: 300, top: 50 });
+     */
+    setPadding(padding: PaddingOptions, eventData?: Object) {
+        this.jumpTo({padding}, eventData);
+        return this;
+    }
+
+    /**
      * Rotates the map to the specified bearing, with an animated transition. The bearing is the compass direction
      * that is \"up\"; for example, a bearing of 90° orients the map so that east is up.
      *
      * @memberof Map#
      * @param bearing The desired bearing.
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires moveend
@@ -306,7 +342,7 @@ class Camera extends Evented {
      * Rotates the map so that north is up (0° bearing), with an animated transition.
      *
      * @memberof Map#
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires moveend
@@ -321,7 +357,7 @@ class Camera extends Evented {
      * Rotates and pitches the map so that north is up (0° bearing) and pitch is 0°, with an animated transition.
      *
      * @memberof Map#
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires moveend
@@ -341,7 +377,7 @@ class Camera extends Evented {
      * `bearingSnap` threshold).
      *
      * @memberof Map#
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires moveend
@@ -380,10 +416,10 @@ class Camera extends Evented {
 
     /**
      * @memberof Map#
-     * @param {LatLngBoundsLike} bounds Calculate the center for these bounds in the viewport and use
+     * @param {LngLatBoundsLike} bounds Calculate the center for these bounds in the viewport and use
      *      the highest zoom level up to and including `Map#getMaxZoom()` that fits
      *      in the viewport. LatLngBounds represent a box that is always axis-aligned with bearing 0.
-     * @param options
+     * @param options Options object
      * @param {number | PaddingOptions} [options.padding] The amount of padding in pixels to add to the given bounds.
      * @param {PointLike} [options.offset=[0, 0]] The center of the given bounds relative to the map's center, measured in pixels.
      * @param {number} [options.maxZoom] The maximum zoom level to allow when the camera would transition to the specified bounds.
@@ -424,13 +460,14 @@ class Camera extends Evented {
      * });
      */
     _cameraForBoxAndBearing(p0: LngLatLike, p1: LngLatLike, bearing: number, options?: CameraOptions): void | CameraOptions & AnimationOptions {
+        const defaultPadding = {
+            top: 0,
+            bottom: 0,
+            right: 0,
+            left: 0
+        };
         options = extend({
-            padding: {
-                top: 0,
-                bottom: 0,
-                right: 0,
-                left: 0
-            },
+            padding: defaultPadding,
             offset: [0, 0],
             maxZoom: this.transform.maxZoom
         }, options);
@@ -444,18 +481,10 @@ class Camera extends Evented {
                 left: p
             };
         }
-        if (!deepEqual(Object.keys(options.padding).sort((a, b) => {
-            if (a < b) return -1;
-            if (a > b) return 1;
-            return 0;
-        }), ["bottom", "left", "right", "top"])) {
-            warnOnce(
-                "options.padding must be a positive number, or an Object with keys 'bottom', 'left', 'right', 'top'"
-            );
-            return;
-        }
 
+        options.padding = extend(defaultPadding, options.padding);
         const tr = this.transform;
+        const edgePadding = tr.padding;
 
         // We want to calculate the upper right and lower left of the box defined by p0 and p1
         // in a coordinate system rotate to match the destination bearing.
@@ -469,8 +498,8 @@ class Camera extends Evented {
 
         // Calculate zoom: consider the original bbox and padding.
         const size = upperRight.sub(lowerLeft);
-        const scaleX = (tr.width - options.padding.left - options.padding.right) / size.x;
-        const scaleY = (tr.height - options.padding.top - options.padding.bottom) / size.y;
+        const scaleX = (tr.width - (edgePadding.left + edgePadding.right + options.padding.left + options.padding.right)) / size.x;
+        const scaleY = (tr.height - (edgePadding.top + edgePadding.bottom + options.padding.top + options.padding.bottom)) / size.y;
 
         if (scaleY < 0 || scaleX < 0) {
             warnOnce(
@@ -539,7 +568,7 @@ class Camera extends Evented {
      * @param p0 First point on screen, in pixel coordinates
      * @param p1 Second point on screen, in pixel coordinates
      * @param bearing Desired map bearing at end of animation, in degrees
-     * @param options
+     * @param options Options object
      * @param {number | PaddingOptions} [options.padding] The amount of padding in pixels to add to the given bounds.
      * @param {boolean} [options.linear=false] If `true`, the map transitions using
      *     {@link Map#easeTo}. If `false`, the map transitions using {@link Map#flyTo}. See
@@ -575,6 +604,8 @@ class Camera extends Evented {
         if (!calculatedOptions) return this;
 
         options = extend(calculatedOptions, options);
+        // Explictly remove the padding field because, calculatedOptions already accounts for padding by setting zoom and center accordingly.
+        delete options.padding;
 
         return options.linear ?
             this.easeTo(options, eventData) :
@@ -587,7 +618,7 @@ class Camera extends Evented {
      * details not specified in `options`.
      *
      * @memberof Map#
-     * @param options
+     * @param options Options object
      * @param eventData Additional properties to be added to event objects of events triggered by this method.
      * @fires movestart
      * @fires zoomstart
@@ -628,6 +659,10 @@ class Camera extends Evented {
             tr.pitch = +options.pitch;
         }
 
+        if (options.padding != null && !tr.isPaddingEqual(options.padding)) {
+            tr.padding = options.padding;
+        }
+
         this.fire(new Event('movestart', eventData))
             .fire(new Event('move', eventData));
 
@@ -653,7 +688,7 @@ class Camera extends Evented {
     }
 
     /**
-     * Changes any combination of center, zoom, bearing, and pitch, with an animated transition
+     * Changes any combination of center, zoom, bearing, pitch, and padding with an animated transition
      * between old and new values. The map will retain its current values for any
      * details not specified in `options`.
      *
@@ -678,8 +713,8 @@ class Camera extends Evented {
      * @returns {Map} `this`
      * @see [Navigate the map with game-like controls](https://www.mapbox.com/mapbox-gl-js/example/game-controls/)
      */
-    easeTo(options: CameraOptions & AnimationOptions & {delayEndEvents?: number}, eventData?: Object) {
-        this.stop();
+    easeTo(options: CameraOptions & AnimationOptions & {easeId?: string}, eventData?: Object) {
+        this._stop(false, options.easeId);
 
         options = extend({
             offset: [0, 0],
@@ -693,12 +728,15 @@ class Camera extends Evented {
             startZoom = this.getZoom(),
             startBearing = this.getBearing(),
             startPitch = this.getPitch(),
+            startPadding = this.getPadding(),
 
             zoom = 'zoom' in options ? +options.zoom : startZoom,
             bearing = 'bearing' in options ? this._normalizeBearing(options.bearing, startBearing) : startBearing,
-            pitch = 'pitch' in options ? +options.pitch : startPitch;
+            pitch = 'pitch' in options ? +options.pitch : startPitch,
+            padding = 'padding' in options ? options.padding : tr.padding;
 
-        const pointAtOffset = tr.centerPoint.add(Point.convert(options.offset));
+        const offsetAsPoint = Point.convert(options.offset);
+        let pointAtOffset = tr.centerPoint.add(offsetAsPoint);
         const locationAtOffset = tr.pointLocation(pointAtOffset);
         const center = LngLat.convert(options.center || locationAtOffset);
         this._normalizeCenter(center);
@@ -714,11 +752,20 @@ class Camera extends Evented {
             aroundPoint = tr.locationPoint(around);
         }
 
-        this._zooming = (zoom !== startZoom);
-        this._rotating = (startBearing !== bearing);
-        this._pitching = (pitch !== startPitch);
+        const currently = {
+            moving: this._moving,
+            zooming: this._zooming,
+            rotating: this._rotating,
+            pitching: this._pitching
+        };
 
-        this._prepareEase(eventData, options.noMoveStart);
+        this._zooming = this._zooming || (zoom !== startZoom);
+        this._rotating = this._rotating || (startBearing !== bearing);
+        this._pitching = this._pitching || (pitch !== startPitch);
+        this._padding = !tr.isPaddingEqual(padding);
+
+        this._easeId = options.easeId;
+        this._prepareEase(eventData, options.noMoveStart, currently);
 
         clearTimeout(this._easeEndTimeoutID);
 
@@ -731,6 +778,12 @@ class Camera extends Evented {
             }
             if (this._pitching) {
                 tr.pitch = interpolate(startPitch, pitch, k);
+            }
+            if (this._padding) {
+                tr.interpolatePadding(startPadding, padding, k);
+                // When padding is being applied, Transform#centerPoint is changing continously,
+                // thus we need to recalculate offsetPoint every fra,e
+                pointAtOffset = tr.centerPoint.add(offsetAsPoint);
             }
 
             if (around) {
@@ -747,30 +800,26 @@ class Camera extends Evented {
 
             this._fireMoveEvents(eventData);
 
-        }, () => {
-            if (options.delayEndEvents) {
-                this._easeEndTimeoutID = setTimeout(() => this._afterEase(eventData), options.delayEndEvents);
-            } else {
-                this._afterEase(eventData);
-            }
+        }, (interruptingEaseId?: string) => {
+            this._afterEase(eventData, interruptingEaseId);
         }, options);
 
         return this;
     }
 
-    _prepareEase(eventData?: Object, noMoveStart: boolean) {
+    _prepareEase(eventData?: Object, noMoveStart: boolean, currently: Object = {}) {
         this._moving = true;
 
-        if (!noMoveStart) {
+        if (!noMoveStart && !currently.moving) {
             this.fire(new Event('movestart', eventData));
         }
-        if (this._zooming) {
+        if (this._zooming && !currently.zooming) {
             this.fire(new Event('zoomstart', eventData));
         }
-        if (this._rotating) {
+        if (this._rotating && !currently.rotating) {
             this.fire(new Event('rotatestart', eventData));
         }
-        if (this._pitching) {
+        if (this._pitching && !currently.pitching) {
             this.fire(new Event('pitchstart', eventData));
         }
     }
@@ -788,7 +837,14 @@ class Camera extends Evented {
         }
     }
 
-    _afterEase(eventData?: Object) {
+    _afterEase(eventData?: Object, easeId?: string) {
+        // if this easing is being stopped to start another easing with
+        // the same id then don't fire any events to avoid extra start/stop events
+        if (this._easeId && easeId && this._easeId === easeId) {
+            return;
+        }
+        delete this._easeId;
+
         const wasZooming = this._zooming;
         const wasRotating = this._rotating;
         const wasPitching = this._pitching;
@@ -796,6 +852,7 @@ class Camera extends Evented {
         this._zooming = false;
         this._rotating = false;
         this._pitching = false;
+        this._padding = false;
 
         if (wasZooming) {
             this.fire(new Event('zoomend', eventData));
@@ -895,14 +952,17 @@ class Camera extends Evented {
         const tr = this.transform,
             startZoom = this.getZoom(),
             startBearing = this.getBearing(),
-            startPitch = this.getPitch();
+            startPitch = this.getPitch(),
+            startPadding = this.getPadding();
 
         const zoom = 'zoom' in options ? clamp(+options.zoom, tr.minZoom, tr.maxZoom) : startZoom;
         const bearing = 'bearing' in options ? this._normalizeBearing(options.bearing, startBearing) : startBearing;
         const pitch = 'pitch' in options ? +options.pitch : startPitch;
+        const padding = 'padding' in options ? options.padding : tr.padding;
 
         const scale = tr.zoomScale(zoom - startZoom);
-        const pointAtOffset = tr.centerPoint.add(Point.convert(options.offset));
+        const offsetAsPoint = Point.convert(options.offset);
+        let pointAtOffset = tr.centerPoint.add(offsetAsPoint);
         const locationAtOffset = tr.pointLocation(pointAtOffset);
         const center = LngLat.convert(options.center || locationAtOffset);
         this._normalizeCenter(center);
@@ -951,13 +1011,13 @@ class Camera extends Evented {
 
         // w(s): Returns the visible span on the ground, measured in pixels with respect to the
         // initial scale. Assumes an angular field of view of 2 arctan ½ ≈ 53°.
-        let w: (number) => number = function (s) {
+        let w: (_: number) => number = function (s) {
             return (cosh(r0) / cosh(r0 + rho * s));
         };
 
         // u(s): Returns the distance along the flight path as projected onto the ground plane,
         // measured in pixels from the world image origin at the initial scale.
-        let u: (number) => number = function (s) {
+        let u: (_: number) => number = function (s) {
             return w0 * ((cosh(r0) * tanh(r0 + rho * s) - sinh(r0)) / rho2) / u1;
         };
 
@@ -990,6 +1050,7 @@ class Camera extends Evented {
         this._zooming = true;
         this._rotating = (startBearing !== bearing);
         this._pitching = (pitch !== startPitch);
+        this._padding = !tr.isPaddingEqual(padding);
 
         this._prepareEase(eventData, false);
 
@@ -1004,6 +1065,12 @@ class Camera extends Evented {
             }
             if (this._pitching) {
                 tr.pitch = interpolate(startPitch, pitch, k);
+            }
+            if (this._padding) {
+                tr.interpolatePadding(startPadding, padding, k);
+                // When padding is being applied, Transform#centerPoint is changing continously,
+                // thus we need to recalculate offsetPoint every frame
+                pointAtOffset = tr.centerPoint.add(offsetAsPoint);
             }
 
             const newCenter = k === 1 ? center : tr.unproject(from.add(delta.mult(u(s))).mult(scale));
@@ -1027,6 +1094,10 @@ class Camera extends Evented {
      * @returns {Map} `this`
      */
     stop(): this {
+        return this._stop();
+    }
+
+    _stop(allowGestures?: boolean, easeId?: string): this {
         if (this._easeFrameId) {
             this._cancelRenderFrame(this._easeFrameId);
             delete this._easeFrameId;
@@ -1039,14 +1110,18 @@ class Camera extends Evented {
             // it unintentionally.
             const onEaseEnd = this._onEaseEnd;
             delete this._onEaseEnd;
-            onEaseEnd.call(this);
+            onEaseEnd.call(this, easeId);
+        }
+        if (!allowGestures) {
+            const handlers = (this: any).handlers;
+            if (handlers) handlers.stop();
         }
         return this;
     }
 
-    _ease(frame: (number) => void,
+    _ease(frame: (_: number) => void,
           finish: () => void,
-          options: {animate: boolean, duration: number, easing: (number) => number}) {
+          options: {animate: boolean, duration: number, easing: (_: number) => number}) {
         if (options.animate === false || options.duration === 0) {
             frame(1);
             finish();
@@ -1091,5 +1166,40 @@ class Camera extends Evented {
             delta < -180 ? 360 : 0;
     }
 }
+
+// In debug builds, check that camera change events are fired in the correct order.
+// - ___start events needs to be fired before ___ and ___end events
+// - another ___start event can't be fired before a ___end event has been fired for the previous one
+function addAssertions(camera: Camera) { //eslint-disable-line
+    Debug.run(() => {
+        const inProgress = {};
+
+        ['drag', 'zoom', 'rotate', 'pitch', 'move'].forEach(name => {
+            inProgress[name] = false;
+
+            camera.on(`${name}start`, () => {
+                assert(!inProgress[name], `"${name}start" fired twice without a "${name}end"`);
+                inProgress[name] = true;
+                assert(inProgress.move);
+            });
+
+            camera.on(name, () => {
+                assert(inProgress[name]);
+                assert(inProgress.move);
+            });
+
+            camera.on(`${name}end`, () => {
+                assert(inProgress.move);
+                assert(inProgress[name]);
+                inProgress[name] = false;
+            });
+        });
+
+        // Canary used to test whether this function is stripped in prod build
+        canary = 'canary debug run';
+    });
+}
+
+let canary; //eslint-disable-line
 
 export default Camera;

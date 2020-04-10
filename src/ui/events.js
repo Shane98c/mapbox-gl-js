@@ -65,6 +65,7 @@ export class MapMouseEvent extends Event {
 
     /**
      * `true` if `preventDefault` has been called.
+     * @private
      */
     get defaultPrevented(): boolean {
         return this._defaultPrevented;
@@ -144,6 +145,7 @@ export class MapTouchEvent extends Event {
 
     /**
      * `true` if `preventDefault` has been called.
+     * @private
      */
     get defaultPrevented(): boolean {
         return this._defaultPrevented;
@@ -155,7 +157,7 @@ export class MapTouchEvent extends Event {
      * @private
      */
     constructor(type: string, map: Map, originalEvent: TouchEvent) {
-        const points = DOM.touchPos(map.getCanvasContainer(), originalEvent);
+        const points = DOM.touchPos(map.getCanvasContainer(), originalEvent.touches);
         const lngLats = points.map((t) => map.unproject(t));
         const point = points.reduce((prev, curr, i, arr) => {
             return prev.add(curr.div(arr.length));
@@ -197,6 +199,7 @@ export class MapWheelEvent extends Event {
 
     /**
      * `true` if `preventDefault` has been called.
+     * @private
      */
     get defaultPrevented(): boolean {
         return this._defaultPrevented;
@@ -567,7 +570,7 @@ export type MapEvent =
     | 'pitchstart'
 
     /**
-     * Fired whenever the map's pitch (tilt) changes as.
+     * Fired whenever the map's pitch (tilt) changes as
      * the result of either user interaction or methods such as {@link Map#flyTo}.
      *
      * @event pitch
