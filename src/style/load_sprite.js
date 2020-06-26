@@ -9,6 +9,7 @@ import type {StyleImage} from './style_image';
 import type {RequestManager} from '../util/mapbox';
 import type {Callback} from '../types/callback';
 import type {Cancelable} from '../types/cancelable';
+import {isMapboxURL} from '../util/mapbox';
 
 export default function(baseURL: string,
                           requestManager: RequestManager,
@@ -16,7 +17,14 @@ export default function(baseURL: string,
     let json: any, image, error;
     const format = browser.devicePixelRatio > 1 ? '@2x' : '';
 
-    let jsonRequest = getJSON(requestManager.transformRequest(requestManager.normalizeSpriteURL(baseURL, format, '.json'), ResourceType.SpriteJSON), (err: ?Error, data: ?Object) => {
+    let spriteJSONUrl = isMapboxURL(baseURL)
+        ? requestMangager.transformRequestCallback(
+              requestMangager.normalizeSpriteURL(baseURL, format, ".json"),
+              ResourceType.SpriteJSON
+          )
+        : { url: `${baseURL + format}.json` };
+
+    let jsonRequest = getJSON(spriteJSONUrl, (err, data) => {
         jsonRequest = null;
         if (!error) {
             error = err;
@@ -25,7 +33,13 @@ export default function(baseURL: string,
         }
     });
 
-    let imageRequest = getImage(requestManager.transformRequest(requestManager.normalizeSpriteURL(baseURL, format, '.png'), ResourceType.SpriteImage), (err, img) => {
+    let spritePNGUrl = isMapboxURL(baseURL)
+        ? requestMangager.transformRequestCallback(
+              requestMangager.normalizeSpriteURL(baseURL, format, ".png"),
+              ResourceType.SpriteImage
+          )
+        : { url: `${baseURL + format}.png` };
+    let imageRequest = getImage(spritePNGUrl, (err, img) => {
         imageRequest = null;
         if (!error) {
             error = err;
